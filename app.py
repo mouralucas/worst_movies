@@ -19,6 +19,7 @@ class ReadCsv(Resource):
 
         return response
 
+
 class WorstMovie:
     def __init__(self):
         self.conn = sqlite3.connect('worst_movie.db')
@@ -81,43 +82,79 @@ class WorstMovie:
         return self.response
 
     def _get_gaps(self):
-        # Query para buscar as informações de quem já ganhou mais de uma vez e quais os respectivos anos
-        queryset = self.conn.execute('select producer, max(year) as max, min(year) as min, max(year) - min(year) as gap '
-                                     'from WINNERS_TEMP '
-                                     'group by producer '
-                                     'HAVING max(year) - min(year) > 0 '
-                                     'order by max(year) - min(year) desc;')
-        gaps = queryset.fetchall()
+        # Busca os produtores que ganharam mais de uma vez e os respectivos anos
+        queryset_ganhadores = self.conn.execute('select producer, year '
+                                                'from WINNERS_TEMP '
+                                                'where producer in (select producer '
+                                                '                       from WINNERS_TEMP'
+                                                '                       group by producer '
+                                                '                       having count(year) > 1) '
+                                                'group by producer, year '
+                                                'order by producer, year')
+        ganhadores = queryset_ganhadores.fetchall()
 
-        # Encontra os registros com maior e o menor gap dos produtores que já venceram
-        min_gap = min(gaps, key=lambda t: t[3])
-        max_gap = max(gaps, key=lambda t: t[3])
-
-        # Pega os valores de maior e menor gap, caso exista
-        min_gap = min_gap[3] if min_gap else 0
-        max_gap = max_gap[3] if max_gap else 0
-
-        # Cria a lista de max e min buscando na lista de vencedores quem tem o maior e menor gap
-        list_producers_max_gap = []
-        list_producers_min_gap = []
-        for row in gaps:
-            if row[3] == max_gap:
-                aux = {
-                    'producer': row[0],
-                    'interval': max_gap,
-                    'previousWin': row[2],
-                    'followingWin': row[1]
+        # Define o max e min gap que ocorreram por produtor que ganhou o prêmio
+        ls_max = []
+        ls_min = []
+        producers_gap = {}
+        last_win = 0
+        lower_gap_found = 0
+        higher_gap_found = 0
+        for idx, row in enumerate(ganhadores):
+            if producers_gap.get(row[0]) is None:
+                last_win = row[1]
+                producers_gap[row[0]] = {
+                    'min': 0,
+                    'max': 0
                 }
-                list_producers_max_gap.append(aux)
+            else:
+                current_win = row[1]
 
-            if row[3] == min_gap:
-                aux = {
-                    'producer': row[0],
-                    'interval': min_gap,
-                    'previousWin': row[2],
-                    'followingWin': row[1]
-                }
-                list_producers_min_gap.append(aux)
+                # Busca os gaps por produtor
+                if (current_win - last_win < producers_gap[row[0]]['min']) or producers_gap[row[0]]['min'] == 0:
+                    producers_gap[row[0]]['min'] = current_win - last_win
+
+                if current_win - last_win > producers_gap[row[0]]['max']:
+                    producers_gap[row[0]]['max'] = current_win - last_win
+
+                # Se houver um gap menor limpa a lista e adiciona o ganhador com esse gap
+                # Se tiver um ganhador com o mesmo gap faz append na lista de ganhadores do gap minimo
+                if producers_gap[row[0]]['min'] < lower_gap_found or lower_gap_found == 0:
+                    lower_gap_found = producers_gap[row[0]]['min']
+                    ls_min = [(row[0], current_win, last_win, current_win - last_win)]
+                elif (producers_gap[row[0]]['min'] == lower_gap_found) and (current_win - last_win == lower_gap_found):
+                    ls_min.append((row[0], current_win, last_win, current_win - last_win))
+
+                # Se houver um gap maior limpa a lista e adiciona o ganhador com esse gap
+                # Se tiver um ganhador com o mesmo gap faz append na lista de ganhadores do gap maximo
+                if producers_gap[row[0]]['max'] > higher_gap_found:
+                    higher_gap_found = producers_gap[row[0]]['max']
+                    ls_max = [(row[0], current_win, last_win, current_win - last_win)]
+                elif producers_gap[row[0]]['max'] == higher_gap_found and (current_win - last_win == higher_gap_found):
+                    ls_max.append((row[0], current_win, last_win, current_win - last_win))
+
+                last_win = current_win
+
+        # Cria as listas para retorno
+        list_producers_max_gap = [
+            {
+                'producer': i[0],
+                'interval': i[3],
+                'previousWin': i[2],
+                'followingWin': i[1],
+            }
+            for i in ls_max
+        ]
+
+        list_producers_min_gap = [
+            {
+                'producer': i[0],
+                'interval': i[3],
+                'previousWin': i[2],
+                'followingWin': i[1],
+            }
+            for i in ls_min
+        ]
 
         # Monta o dicinario final que sera retornado
         self.response = {
@@ -131,6 +168,7 @@ class WorstMovie:
         # Cria uma tabela temporária para simplificação do cálculo de produtores que ganharam o premio
         #   e o gap entre cada vitória
         self.conn.execute('CREATE TABLE IF NOT EXISTS WINNERS_TEMP (year INTEGER , producer TEXT)')
+        self.conn.execute('DELETE FROM WINNERS_TEMP')
         for row in [tuple(x) for x in dataframe.to_numpy()]:
             self.cursor.execute('insert into WINNERS_TEMP (producer, year) values {}'.format(tuple(row)))
         self.conn.commit()
